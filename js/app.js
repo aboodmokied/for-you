@@ -121,6 +121,12 @@
     },
     puff() { this.noise(.4, { freq: 700, q: .6, vol: .22, sweep: .5 }); },
     whoosh() { this.noise(.5, { freq: 400, q: .7, vol: .14, sweep: 4 }); },
+    clink() {
+      this.tone(2637, { dur: .25, vol: .05, type: 'triangle' });
+      this.tone(3322, { t: .07, dur: .22, vol: .04, type: 'triangle' });
+      this.tone(2093, { t: .16, dur: .3, vol: .04, type: 'triangle' });
+      this.noise(.18, { freq: 4000, q: 1.5, vol: .05 });
+    },
     melody(seq, beat = .36, vol = .06) {
       let t = .05;
       for (const [f, len] of seq) {
@@ -245,6 +251,7 @@
       this.cv.width = this.w * dpr; this.cv.height = this.h * dpr;
       this.c.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
+    poke(x, y) { this.px = x; this.py = y; this.pt = performance.now(); }
     setMode(name) {
       const p = PRESETS[name] || PRESETS.none;
       if (p === this.preset) return;
@@ -279,6 +286,10 @@
           p.x += (p.vx + (p.sway ? Math.sin(t * .001 * p.sws + p.ph) * .18 : 0)) * dt;
           p.y += p.vy * dt;
           p.rot += p.vr * dt;
+          if (this.pt && t - this.pt < 900 && (p.vx || p.vy)) {
+            const dx = p.x - this.px, dy = p.y - this.py, d2 = dx * dx + dy * dy;
+            if (d2 < 12100 && d2 > 1) { const d = Math.sqrt(d2), f = (1 - d / 110) * 3 * dt; p.x += dx / d * f; p.y += dy / d * f; }
+          }
           if (p.y < -40) { if (p.dying) continue; p.y = this.h + 40; p.x = rand(0, this.w); }
           if (p.y > this.h + 40) p.y = -40;
           if (p.x < -40) p.x = this.w + 40; else if (p.x > this.w + 40) p.x = -40;
@@ -584,11 +595,14 @@
           <h1 class="title rv" tabindex="-1" data-focus>اليوم انولدت فيه أجمل إنسانة بحياتي.</h1>
           <div class="cake-wrap rv"><div class="cake-glow"></div>${cakeSVG(n)}</div>
           <p class="hint rv" aria-live="polite">اضغطي على الشموع لتطفيها 🕯️</p>
+          <button class="btn btn-soft mic-btn rv" type="button" hidden>🎤 أو انفخي عالشموع بالمايك</button>
           <div class="wish" aria-live="polite">
             <p class="wish-1">اتمني أمنية يا روحي...</p>
             <p class="wish-2">وأنا أمنيتي تضلّي معي العمر كله ❤️</p>
           </div>`;
         const hint = $('.hint', inner), w1 = $('.wish-1', inner), w2 = $('.wish-2', inner);
+        const cake = $('.cake', inner), micBtn = $('.mic-btn', inner);
+        micBtn.hidden = !(window.isSecureContext && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
         const setLit = v => {
           inner.style.setProperty('--lit', v);
           document.documentElement.style.setProperty('--dim', (1 - v).toFixed(2));
@@ -599,7 +613,9 @@
         ctx.wait(1500).then(() => Sound.melody(HAPPY_BIRTHDAY));
 
         let lit = n;
-        $$('.candle', inner).forEach(c => onActivate(c, () => {
+        const candles = $$('.candle', inner);
+        candles.forEach(c => onActivate(c, () => blowOut(c)));
+        function blowOut(c) {
           if (c.classList.contains('out') || lit === 0) return;
           c.classList.add('out');
           c.setAttribute('aria-label', 'الشمعة انطفت');
@@ -609,11 +625,65 @@
           setLit(lit / n);
           hint.textContent = lit === 0 ? '' : lit === 1 ? 'باقي شمعة وحدة... 🕯️' : lit === 2 ? 'باقي شمعتين 🕯️🕯️' : `باقي ${arNum(lit)} شموع 🕯️`;
           if (lit === 0) finish();
-        }));
+        }
+
+        // Blowing on the phone's microphone puts the candles out too
+        let stream = null, srcNode = null, micRaf = 0;
+        const stopMic = () => {
+          cancelAnimationFrame(micRaf);
+          if (srcNode) { try { srcNode.disconnect(); } catch (e) { /* ignore */ } }
+          if (stream) stream.getTracks().forEach(t => t.stop());
+          stream = null; srcNode = null;
+          cake.style.setProperty('--blow', '0');
+          micBtn.classList.remove('listening');
+        };
+        ctx.onLeave(stopMic);
+        micBtn.addEventListener('click', async () => {
+          if (stream) { stopMic(); micBtn.textContent = '🎤 أو انفخي عالشموع بالمايك'; return; }
+          Sound.init();
+          micBtn.disabled = true;
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+          } catch (e) {
+            micBtn.textContent = 'المايك ما اشتغل... اضغطي عالشموع 🕯️';
+            return;
+          }
+          if (!ctx.alive() || lit === 0 || !Sound.init()) { stopMic(); micBtn.hidden = true; return; }
+          micBtn.disabled = false;
+          Sound.stopMusic();
+          const an = Sound.ctx.createAnalyser();
+          an.fftSize = 512;
+          srcNode = Sound.ctx.createMediaStreamSource(stream);
+          srcNode.connect(an);
+          const buf = new Float32Array(an.fftSize);
+          micBtn.textContent = '💨 انفخي هلأ... (اضغطي لتوقفي المايك)';
+          micBtn.classList.add('listening');
+          let strong = 0, last = 0, level = 0;
+          const loop = t => {
+            if (!stream) return;
+            an.getFloatTimeDomainData(buf);
+            let sum = 0;
+            for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+            const rms = Math.sqrt(sum / buf.length);
+            level += (rms - level) * .3;
+            cake.style.setProperty('--blow', Math.min(1, level * 5).toFixed(2));
+            strong = rms > .12 ? strong + 1 : 0;
+            if (strong >= 3 && t - last > 260) {
+              last = t;
+              const litNow = candles.filter(c => !c.classList.contains('out'));
+              if (litNow.length) blowOut(pick(litNow));
+            }
+            if (lit === 0) { stopMic(); return; }
+            micRaf = requestAnimationFrame(loop);
+          };
+          micRaf = requestAnimationFrame(loop);
+        });
 
         async function finish() {
           Sound.stopMusic();
+          stopMic();
           hint.classList.add('gone');
+          micBtn.classList.add('gone');
           await ctx.wait(1200);
           showEl(w1);
           Sound.chime([1046.5, 1318.5, 1568, 2093], .14, .06);
@@ -632,48 +702,221 @@
       }
     },
 
-    /* ---------- 3 · Seven Reasons ---------- */
+    /* ---------- 3 · The Love Jar ---------- */
     {
       ambient: 'hearts',
       render(ctx) {
         const { inner } = ctx;
         const reasons = (C.reasons || []).slice(0, 7);
         while (reasons.length < 7) reasons.push('لأنك إنتِ... وبس ❤️');
-        const papers = ['#ffd6e0', '#fff1d6', '#e9dcff', '#ffe0cc', '#d9f0ff', '#ffe3ef', '#f3ffd9'];
-        const rots = [-4, 3, -2, 4, -3, 2, -1];
+        // [paper, rod shade, bulb glow]
+        const ROLLS = [
+          ['#ffd6e0', '#f08aa8', '#ff4f86'], ['#fff1c9', '#e2b450', '#f6b93b'], ['#e7dcff', '#a88be0', '#9b6bff'],
+          ['#ffe0cc', '#f09a6c', '#ff8a50'], ['#d6f0ff', '#7fbde3', '#36a9e1'], ['#ffe3ef', '#f07fae', '#ff6fae'],
+          ['#e6ffd9', '#8fcf8f', '#5cc46b']
+        ];
+        const PILE = [[6, 4, -12], [38, 3, 8], [62, 7, -6], [16, 16, 16], [48, 15, -18], [26, 27, 7], [56, 27, 13]];
+        const HEARTS = [[4, 24, -15, '#ff5c8a'], [84, 16, 12, '#ff8fb0'], [42, 38, -8, '#ff3d73'], [80, 34, 20, '#ffb3c6'],
+          [18, 40, 10, '#ff8fb0'], [66, 42, -14, '#ff5c8a'], [88, 4, 8, '#ffb3c6'], [34, 50, 4, '#ff6b9a']];
+        const TAKE = [6, 5, 4, 3, 2, 1, 0];
         const NOTES = [1046.5, 1175, 1318.5, 1568, 1760, 2093, 2349];
+        // bulbs hang on a curved wire; the first reason lights the rightmost bulb (RTL)
+        const bulbsHTML = ROLLS.map((c, j) => {
+          const t = 1 - (j + 1) / 8;
+          const y = (1 - t) ** 2 * 8 + 2 * (1 - t) * t * 90 + t * t * 8;
+          return `<button class="bulb" type="button" disabled style="--x:${(t * 100).toFixed(2)}%; --y:${y.toFixed(2)}%; --c:${c[2]}; --d:${(j * .4).toFixed(1)}s; --i:${j}" aria-label="السبب رقم ${arNum(j + 1)} لسا جوّا المرطبان">${heartSVG()}</button>`;
+        }).join('');
+
         inner.innerHTML = `
+          <p class="lead rv">خبّيتلك بهالمرطبان إشي صغير...</p>
           <h1 class="title s3-title rv" tabindex="-1" data-focus>7 أسباب بتخلّيني أحبك كل يوم أكتر</h1>
-          <p class="hint rv" aria-live="polite">افتحي كل الرسائل الصغيرة 💗 <span class="s3-count">(${arNum(0)} من ${arNum(7)})</span></p>
-          <div class="notes">${reasons.map((r, k) => `
-            <button class="note" type="button" style="--r:${rots[k]}deg; --paper:${papers[k]}" aria-label="افتحي السبب رقم ${arNum(k + 1)}">
-              <span class="note-inner">
-                <span class="note-face note-front"><span class="tape"></span><span class="note-num">${arNum(k + 1)}</span>${heartSVG('note-heart')}<span class="note-open-txt">افتحيني</span></span>
-                <span class="note-face note-back">${heartSVG('note-pin')}<span class="note-text">${esc(r)}</span></span>
+          <div class="jar-stage rv">
+            <button class="jar" type="button" aria-label="هزّي المرطبان ليطلع منه سبب">
+              <span class="jar-glass">
+                <span class="jar-fill">
+                  ${PILE.map(([x, y, r], k) => `<span class="roll" style="--x:${x}%; --y:${y}%; --r:${r}deg; --c:${ROLLS[k][0]}; --c2:${ROLLS[k][1]}"></span>`).join('')}
+                  ${HEARTS.map(([x, y, r, c]) => `<svg class="jar-heart" viewBox="0 0 24 24" aria-hidden="true" style="--x:${x}%; --y:${y}%; --r:${r}deg; --c:${c}"><path d="${HEART_PATH}"/></svg>`).join('')}
+                </span>
+                <span class="jar-shine"></span>
               </span>
-            </button>`).join('')}
+              <span class="jar-neck"></span>
+              <span class="jar-lid"><span class="jar-string"></span></span>
+              <span class="jar-tag">إلك ❤️</span>
+            </button>
+          </div>
+          <p class="hint rv" aria-live="polite">اضغطي على المرطبان أو هزّي الموبايل 📳</p>
+          <div class="garland rv" role="group" aria-label="الأسباب اللي طلعت من المرطبان">
+            <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M0 8 Q50 90 100 8"/></svg>
+            ${bulbsHTML}
           </div>
           <p class="title s3-final" hidden aria-live="polite">وصدقيني... هدول بس 7 من مليون سبب ❤️</p>`;
-        revealIn(ctx, $$('.rv', inner), 300);
-        const notes = $$('.note', inner);
-        ctx.wait(700).then(async () => { for (const nEl of notes) { nEl.classList.add('in'); await ctx.wait(110); } });
+        revealIn(ctx, $$('.rv', inner), 320);
 
-        const count = $('.s3-count', inner);
-        let opened = 0;
-        notes.forEach((note, k) => note.addEventListener('click', () => {
-          if (note.classList.contains('open')) return;
-          note.classList.add('open');
-          note.setAttribute('aria-label', `السبب رقم ${arNum(k + 1)}: ${reasons[k]}`);
-          opened++;
-          count.textContent = `(${arNum(opened)} من ${arNum(7)})`;
-          Sound.chime([NOTES[opened - 1]], .08, .07);
-          const r = centerOf(note);
-          fx.burst(r.x, r.y, { n: 14, kinds: ['heart'], colors: PINKS, speed: [2, 5], size: [8, 14], gravity: .06 });
-          if (opened === 7) finish();
+        const jar = $('.jar', inner), hint = $('.hint', inner), garland = $('.garland', inner);
+        const rolls = $$('.roll', inner), jarHearts = $$('.jar-heart', inner), bulbs = $$('.bulb', inner);
+        let taken = 0, busy = false, pop = null;
+
+        function jiggle() {
+          const items = [...rolls, ...jarHearts].filter(el => !el.classList.contains('gone'));
+          items.forEach(el => {
+            el.style.setProperty('--jx', `${rand(-7, 7).toFixed(1)}px`);
+            el.style.setProperty('--jy', `${rand(-16, -2).toFixed(1)}px`);
+          });
+          setTimeout(() => items.forEach(el => { el.style.setProperty('--jx', '0px'); el.style.setProperty('--jy', '0px'); }), 240);
+        }
+
+        async function shake() {
+          if (busy || taken >= 7 || !ctx.alive()) return;
+          busy = true;
+          jar.classList.remove('shake'); void jar.offsetWidth; jar.classList.add('shake');
+          jiggle();
+          setTimeout(jiggle, 260);
+          Sound.clink();
+          if (navigator.vibrate) { try { navigator.vibrate([25, 40, 25]); } catch (e) { /* ignore */ } }
+          await ctx.wait(580);
+          const j = taken++;
+          const roll = rolls[TAKE[j]];
+          const r = roll.getBoundingClientRect();
+          roll.classList.add('gone');
+          // the little hearts settle down as the jar empties
+          jarHearts.forEach((h, i) => h.style.setProperty('--y', `${(HEARTS[i][1] * (.12 + .88 * (7 - taken) / 7)).toFixed(1)}%`));
+          if (taken === 7) jar.classList.add('empty');
+          await flyOut(roll, r);
+          if (ctx.alive()) openReason(j, true);
+        }
+
+        function flyOut(roll, r) {
+          Sound.tone(560, { dur: .55, vol: .05, glide: 2.6 });
+          if (reduced()) return Promise.resolve();
+          const f = document.createElement('span');
+          f.className = 'roll flyer';
+          f.style.cssText = roll.style.cssText;
+          f.style.width = `${r.width}px`;
+          f.style.height = `${r.height}px`;
+          document.body.append(f);
+          const jr = jar.getBoundingClientRect();
+          const rot = parseFloat(roll.style.getPropertyValue('--r')) || 0;
+          const mx = jr.left + jr.width / 2 - r.width / 2, my = jr.top - r.height * 1.5;
+          const cx = innerWidth / 2 - r.width / 2, cy = innerHeight / 2 - r.height / 2;
+          const a = f.animate([
+            { transform: `translate(${r.left}px, ${r.top}px) rotate(${rot}deg)` },
+            { transform: `translate(${mx}px, ${my}px) rotate(${rot + 200}deg) scale(1.25)`, offset: .45 },
+            { transform: `translate(${cx}px, ${cy}px) rotate(720deg) scale(2.3)`, opacity: .9 }
+          ], { duration: 1050, easing: 'cubic-bezier(.3,.7,.3,1)', fill: 'forwards' });
+          return a.finished.then(() => f.remove(), () => f.remove());
+        }
+
+        function openReason(j, isNew) {
+          const [c, c2] = ROLLS[TAKE[j]];
+          pop = document.createElement('div');
+          pop.className = 'reason-pop';
+          pop.setAttribute('role', 'dialog');
+          pop.setAttribute('aria-modal', 'true');
+          pop.setAttribute('aria-label', `السبب رقم ${arNum(j + 1)}`);
+          pop.innerHTML = `
+            <div class="scroll" style="--c:${c}; --c2:${c2}">
+              <span class="rod top"></span>
+              <div class="scroll-paper">
+                <span class="scroll-num">السبب ${arNum(j + 1)} من ${arNum(7)}</span>
+                <p class="scroll-text">${wrapWords(reasons[j])}</p>
+                <button class="btn scroll-keep" type="button">${isNew ? 'خبّيتها بقلبي 💗' : 'رجّعيها 💗'}</button>
+              </div>
+              <span class="rod bottom"></span>
+            </div>`;
+          document.body.append(pop);
+          const me = pop, scroll = $('.scroll', me), paper = $('.scroll-paper', me), rods = $$('.rod', me), keep = $('.scroll-keep', me);
+          const words = $$('.w', me), step = reduced() ? 0 : 90;
+          words.forEach((w, i) => { w.style.transitionDelay = `${250 + i * step}ms`; });
+          keep.style.transitionDelay = `${350 + words.length * step}ms`;
+          if (!reduced()) {
+            const h = paper.offsetHeight, opt = { duration: 900, easing: 'cubic-bezier(.2,.8,.2,1)' };
+            paper.animate([{ clipPath: 'inset(50% 0 50% 0)' }, { clipPath: 'inset(0 0 0 0)' }], opt);
+            rods[0].animate([{ transform: `translateY(${h / 2}px)` }, { transform: 'none' }], opt);
+            rods[1].animate([{ transform: `translateY(${-h / 2}px)` }, { transform: 'none' }], opt);
+          }
+          requestAnimationFrame(() => requestAnimationFrame(() => { me.classList.add('in'); scroll.classList.add('shown'); }));
+          if (isNew) Sound.chime([NOTES[j]], .08, .07); else Sound.tone(NOTES[j], { dur: .9, vol: .04 });
+          setTimeout(() => { if (me.isConnected) keep.focus({ preventScroll: true }); }, 450);
+          const close = () => closeReason(me, j, isNew);
+          keep.addEventListener('click', close);
+          me.addEventListener('click', e => { if (e.target === me) close(); });
+          me.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+        }
+
+        async function closeReason(me, j, isNew) {
+          if (me.dataset.closing) return;
+          me.dataset.closing = '1';
+          const sr = $('.scroll', me).getBoundingClientRect();
+          me.classList.remove('in');
+          setTimeout(() => me.remove(), 450);
+          if (pop === me) pop = null;
+          if (!isNew) { bulbs[j].focus({ preventScroll: true }); return; }
+          await flyHeart(sr, bulbs[j], ROLLS[j][2]);
+          if (!ctx.alive()) return;
+          const bulb = bulbs[j];
+          bulb.classList.add('on');
+          bulb.disabled = false;
+          bulb.setAttribute('aria-label', `السبب ${arNum(j + 1)}: ${reasons[j]}`);
+          const r = centerOf(bulb);
+          fx.burst(r.x, r.y, { n: 14, kinds: ['spark', 'heart'], colors: [ROLLS[j][2], '#ffffff'], speed: [1, 3.5], size: [6, 11], gravity: .03, life: [35, 60] });
+          Sound.chime([NOTES[j] * 1.5], .05, .05);
+          hint.textContent = taken < 7 ? `طلع ${arNum(taken)} من ${arNum(7)}... هزّي كمان 💗` : '';
+          busy = false;
+          if (taken === 7) finish();
+          else jar.focus({ preventScroll: true });
+        }
+
+        function flyHeart(from, bulb, color) {
+          if (reduced()) return Promise.resolve();
+          const b = bulb.getBoundingClientRect();
+          const f = document.createElement('span');
+          f.className = 'heart-flyer';
+          f.style.setProperty('--c', color);
+          f.innerHTML = heartSVG();
+          document.body.append(f);
+          const sx = from.left + from.width / 2 - 20, sy = from.top + from.height / 2 - 20;
+          const ex = b.left + b.width / 2 - 20, ey = b.top + b.height / 2 - 14;
+          const a = f.animate([
+            { transform: `translate(${sx}px, ${sy}px) scale(1.6)`, opacity: 0 },
+            { transform: `translate(${(sx + ex) / 2}px, ${Math.min(sy, ey) - 60}px) scale(1.2) rotate(-15deg)`, opacity: 1, offset: .45 },
+            { transform: `translate(${ex}px, ${ey}px) scale(.6)`, opacity: 1 }
+          ], { duration: 800, easing: 'cubic-bezier(.4,0,.2,1)', fill: 'forwards' });
+          return a.finished.then(() => f.remove(), () => f.remove());
+        }
+
+        bulbs.forEach((bulb, j) => bulb.addEventListener('click', () => {
+          if (!bulb.classList.contains('on') || busy || pop) return;
+          openReason(j, false);
         }));
 
+        // shake the phone — iOS needs a one-time permission, asked on the first tap
+        let asked = false, lastAcc = null, lastShake = 0;
+        const onMotion = e => {
+          const a = e.accelerationIncludingGravity;
+          if (!a || a.x == null) return;
+          if (lastAcc) {
+            const d = Math.abs(a.x - lastAcc.x) + Math.abs(a.y - lastAcc.y) + Math.abs(a.z - lastAcc.z);
+            const now = performance.now();
+            if (d > 22 && now - lastShake > 1300) { lastShake = now; shake(); }
+          }
+          lastAcc = { x: a.x, y: a.y, z: a.z };
+        };
+        addEventListener('devicemotion', onMotion);
+        ctx.onLeave(() => {
+          removeEventListener('devicemotion', onMotion);
+          $$('.reason-pop, .roll.flyer, .heart-flyer').forEach(el => el.remove());
+        });
+        jar.addEventListener('click', () => {
+          if (!asked && typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+            asked = true;
+            DeviceMotionEvent.requestPermission().catch(() => { /* taps still work */ });
+          }
+          shake();
+        });
+
         async function finish() {
-          await ctx.wait(1400);
+          garland.classList.add('all');
+          await ctx.wait(1000);
           const fin = $('.s3-final', inner);
           showEl(fin);
           fin.scrollIntoView({ behavior: reduced() ? 'auto' : 'smooth', block: 'center' });
@@ -1190,13 +1433,14 @@
             <h1 class="title rv" tabindex="-1" data-focus>بس حبي إلك ما إله آخر.</h1>
             <div class="gift-wrap rv">
               <div class="gift-rays"></div>
-              <button class="gift" type="button" aria-label="افتحي الهدية">
+              <button class="gift" type="button" aria-label="الهدية مربوطة بشريطة، فكّيها أول">
                 <span class="gift-beam"></span>
                 <span class="gift-box"></span>
-                <span class="gift-lid"><span class="bow"><svg viewBox="0 0 100 50" aria-hidden="true"><path d="M50 40 C30 6 2 8 8 30 C12 46 38 46 50 40Z" fill="#f6c86e"/><path d="M50 40 C70 6 98 8 92 30 C88 46 62 46 50 40Z" fill="#e9b452"/><path d="M50 40 C42 30 30 26 24 30" stroke="#d99a2b" stroke-width="2" fill="none"/><path d="M50 40 C58 30 70 26 76 30" stroke="#c98a20" stroke-width="2" fill="none"/><circle cx="50" cy="40" r="7.5" fill="#ffe3a3"/></svg></span></span>
+                <span class="gift-lid"></span>
               </button>
+              <button class="bow-handle" type="button" aria-label="اسحبي الشريطة لفوق لتفكّيها"><svg viewBox="0 0 100 50" aria-hidden="true"><path d="M50 40 C30 6 2 8 8 30 C12 46 38 46 50 40Z" fill="#f6c86e"/><path d="M50 40 C70 6 98 8 92 30 C88 46 62 46 50 40Z" fill="#e9b452"/><path d="M50 40 C42 30 30 26 24 30" stroke="#d99a2b" stroke-width="2" fill="none"/><path d="M50 40 C58 30 70 26 76 30" stroke="#c98a20" stroke-width="2" fill="none"/><circle cx="50" cy="40" r="7.5" fill="#ffe3a3"/></svg></button>
             </div>
-            <p class="hint rv">اضغطي على الهدية 🎁</p>
+            <p class="hint rv" aria-live="polite">اسحبي الشريطة لفوق لتفكّيها 🎀</p>
           </div>
           <div class="s8-final" hidden aria-live="polite">
             <p class="fl fl1">لو رجع فيّ الزمن ألف مرة...</p>
@@ -1243,8 +1487,65 @@
           }
         });
 
+        const bow = $('.bow-handle', inner);
+        let tied = true, bowDrag = null;
+        function nudge() {
+          bow.classList.remove('nudge'); void bow.offsetWidth; bow.classList.add('nudge');
+          hint.textContent = 'اسحبي الشريطة لفوق ⬆️🎀';
+          Sound.tone(700, { dur: .2, vol: .05, glide: 1.3, type: 'triangle' });
+        }
+        function untie() {
+          if (!tied) return;
+          tied = false;
+          bowDrag = null;
+          bow.classList.remove('dragging');
+          bow.classList.add('gone');
+          bow.disabled = true;
+          const from = bow.style.transform || 'none';
+          bow.animate([
+            { transform: from, opacity: 1 },
+            { transform: `translate(${rand(-70, 70)}px, ${-innerHeight * .5}px) rotate(${rand(-220, 220)}deg) scale(.6)`, opacity: 0 }
+          ], { duration: reduced() ? 300 : 1100, easing: 'cubic-bezier(.3,.6,.3,1)', fill: 'forwards' });
+          gift.classList.add('untied');
+          gift.setAttribute('aria-label', 'افتحي الهدية');
+          Sound.noise(.45, { freq: 1200, q: .8, vol: .12, sweep: 3 });
+          Sound.chime([1318.5, 1760], .08, .05);
+          const r = centerOf(bow);
+          fx.burst(r.x, r.y, { n: 22, kinds: ['spark', 'star'], colors: GOLDS, speed: [1, 4], gravity: .02, life: [40, 70] });
+          hint.textContent = 'هلأ افتحي الهدية 🎁';
+        }
+        bow.addEventListener('pointerdown', e => {
+          if (!tied) return;
+          e.preventDefault();
+          bowDrag = { x0: e.clientX, y0: e.clientY, id: e.pointerId, moved: 0 };
+          try { bow.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+          bow.classList.add('dragging');
+        });
+        bow.addEventListener('pointermove', e => {
+          if (!bowDrag || e.pointerId !== bowDrag.id) return;
+          const dx = e.clientX - bowDrag.x0, dy = e.clientY - bowDrag.y0;
+          bowDrag.moved = Math.max(bowDrag.moved, Math.hypot(dx, dy));
+          const pull = Math.max(0, -dy);
+          bow.style.transform = `translate(${dx * .35}px, ${Math.min(dy, 0) * .6 + Math.max(dy, 0) * .15}px) rotate(${dx * .15}deg) scale(${1 + pull / 350})`;
+          if (pull > 85) untie();
+        });
+        const bowRelease = e => {
+          if (!bowDrag || e.pointerId !== bowDrag.id) return;
+          const tap = bowDrag.moved < 8;
+          bowDrag = null;
+          bow.classList.remove('dragging');
+          if (!tied) return;
+          bow.style.transform = '';
+          if (tap) nudge();
+        };
+        bow.addEventListener('pointerup', bowRelease);
+        bow.addEventListener('pointercancel', bowRelease);
+        bow.addEventListener('contextmenu', e => e.preventDefault());
+        bow.addEventListener('click', e => { if (e.detail === 0) untie(); }); // keyboard
+
         let opened = false;
         gift.addEventListener('click', async () => {
+          if (tied) { nudge(); return; }
           if (opened) return;
           opened = true;
           ctx.complete();
@@ -1395,6 +1696,19 @@
   syncMute();
   // first touch anywhere unlocks Web Audio on iOS
   addEventListener('pointerdown', () => Sound.init(), { once: true, capture: true });
+
+  // A little magic wherever she touches
+  const TOUCH = [
+    [...GOLDS, '#ffd1e3'], ['#ffc478', '#ffd7aa', '#ff9678', '#fff5d6'], PINKS, [...GOLDS, '#ffffff'],
+    ['#d94a72', '#f6c86e', '#ff8fb0'], ['#ffd38a', '#ffbe6e', '#fff5d6'], ['#ffffff', '#ff4f86', '#ffd1dc'], [...GOLDS, ...PINKS]
+  ];
+  addEventListener('pointerdown', e => {
+    ambient.poke(e.clientX, e.clientY);
+    if (e.target.closest('button, [role="button"], .polaroid, .letter, .reason-pop, a, #topbar')) return;
+    fx.burst(e.clientX, e.clientY, { n: 8, kinds: ['heart', 'spark', 'star'], colors: TOUCH[state.current] || PINKS, speed: [1, 3.2], size: [6, 11], gravity: .02, life: [30, 55] });
+    Sound.tone(pick([1568, 1760, 2093, 2349, 2637]), { dur: .6, vol: .025 });
+  }, { passive: true });
+  addEventListener('pointermove', e => ambient.poke(e.clientX, e.clientY), { passive: true });
 
   let booted = false;
   const boot = () => {
