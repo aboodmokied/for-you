@@ -60,7 +60,7 @@
      Sound — tiny synthesized chimes, no audio files needed
      ========================================================== */
   const Sound = {
-    ctx: null, master: null, music: [], noiseBuf: null,
+    ctx: null, master: null, noiseBuf: null,
     muted: store.get(MUTE_KEY) === '1',
     init() {
       if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return true; }
@@ -69,7 +69,7 @@
       try {
         this.ctx = new AC();
         this.master = this.ctx.createGain();
-        this.master.gain.value = this.muted ? 0 : .6;
+        this.master.gain.value = this.muted ? 0 : .75;
         this.master.connect(this.ctx.destination);
       } catch (e) { this.ctx = null; return false; }
       return true;
@@ -77,9 +77,9 @@
     setMuted(m) {
       this.muted = m;
       store.set(MUTE_KEY, m ? '1' : '0');
-      if (this.master) this.master.gain.setTargetAtTime(m ? 0 : .6, this.ctx.currentTime, .05);
+      if (this.master) this.master.gain.setTargetAtTime(m ? 0 : .75, this.ctx.currentTime, .05);
     },
-    tone(f, { t = 0, dur = 1.2, type = 'sine', vol = .1, attack = .01, glide = 0, music = false } = {}) {
+    tone(f, { t = 0, dur = 1.2, type = 'sine', vol = .1, attack = .01, glide = 0 } = {}) {
       if (this.muted || !this.init()) return;
       const c = this.ctx, now = c.currentTime + t;
       const o = c.createOscillator(), g = c.createGain();
@@ -91,7 +91,6 @@
       g.gain.exponentialRampToValueAtTime(.0001, now + dur);
       o.connect(g); g.connect(this.master);
       o.start(now); o.stop(now + dur + .05);
-      if (music) this.music.push(o);
     },
     chime(notes = [1318, 1760], gap = .08, vol = .07) {
       notes.forEach((f, i) => {
@@ -127,26 +126,138 @@
       this.tone(2093, { t: .16, dur: .3, vol: .04, type: 'triangle' });
       this.noise(.18, { freq: 4000, q: 1.5, vol: .05 });
     },
-    melody(seq, beat = .36, vol = .06) {
-      let t = .05;
-      for (const [f, len] of seq) {
-        this.tone(f, { t, dur: Math.max(.7, len * beat * 1.8), vol, music: true });
-        this.tone(f * 2, { t, dur: .5, vol: vol * .25, music: true });
-        t += len * beat;
+    stopMusic(fade = .8) { Music.stop(fade); }
+  };
+
+  /* ==========================================================
+     Music — looping arrangements with a soft reverb.
+     Muting only silences the master bus, so unmuting resumes the song.
+     ========================================================== */
+  function voice(c, dest, f, t, { type = 'sine', vol = .1, attack = .01, decay = 2 } = {}) {
+    const o = c.createOscillator(), g = c.createGain();
+    o.type = type;
+    o.frequency.value = f;
+    g.gain.setValueAtTime(.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + attack);
+    g.gain.exponentialRampToValueAtTime(.0001, t + attack + decay);
+    o.connect(g); g.connect(dest);
+    o.start(t); o.stop(t + attack + decay + .05);
+  }
+  const piano = (c, d, f, t, vol, decay = 2.4) => {
+    voice(c, d, f, t, { type: 'triangle', vol, attack: .006, decay });
+    voice(c, d, f * 2, t, { vol: vol * .35, attack: .004, decay: decay * .5 });
+    voice(c, d, f * 3, t, { vol: vol * .08, attack: .003, decay: decay * .25 });
+  };
+  const musicBox = (c, d, f, t, vol) => {
+    voice(c, d, f, t, { vol, attack: .004, decay: 1.6 });
+    voice(c, d, f * 2, t, { type: 'triangle', vol: vol * .25, attack: .003, decay: .9 });
+    voice(c, d, f * 4, t, { vol: vol * .1, attack: .002, decay: .4 });
+  };
+  function pad(c, dest, freqs, t, dur, vol) {
+    const lp = c.createBiquadFilter(), g = c.createGain();
+    lp.type = 'lowpass'; lp.frequency.value = 1100;
+    g.gain.setValueAtTime(.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 1.2);
+    g.gain.setValueAtTime(vol, t + Math.max(1.3, dur - .3));
+    g.gain.exponentialRampToValueAtTime(.0001, t + dur + 1.4);
+    lp.connect(g); g.connect(dest);
+    freqs.forEach(fr => [-7, 7].forEach(cents => {
+      const o = c.createOscillator();
+      o.type = 'sawtooth'; o.frequency.value = fr; o.detune.value = cents;
+      o.connect(lp); o.start(t); o.stop(t + dur + 1.5);
+    }));
+  }
+
+  const SONGS = {
+    // Happy Birthday as a waltz: music box melody doubled by piano, oom-pah-pah accompaniment
+    birthday: {
+      beat: .42,
+      step(c, out, t) {
+        const b = this.beat;
+        const mel = [[784, 0], [784, .75], [880, 1], [784, 2], [1046.5, 3], [988, 4], [784, 6], [784, 6.75], [880, 7], [784, 8], [1175, 9], [1046.5, 10],
+          [784, 12], [784, 12.75], [1568, 13], [1318.5, 14], [1046.5, 15], [988, 16], [880, 17], [1397, 18], [1397, 18.75], [1318.5, 19], [1046.5, 20], [1175, 21], [1046.5, 22]];
+        mel.forEach(([f, s]) => { musicBox(c, out, f, t + s * b, .2); piano(c, out, f / 2, t + s * b, .09, 1.4); });
+        const CH = { C: [130.81, [261.63, 329.63, 392]], G: [98, [246.94, 293.66, 392]], F: [87.31, [261.63, 349.23, 440]] };
+        const beats = [[1, 'C', 'C', 'C'], [4, 'G', 'G', 'G'], [7, 'G', 'G', 'G'], [10, 'C', 'C', 'C'], [13, 'C', 'C', 'C'], [16, 'F', 'F', 'F'], [19, 'C', 'C', 'G'], [22, 'C', 'C', 'C']];
+        beats.forEach(([m, x, y, z]) => {
+          piano(c, out, CH[x][0], t + m * b, .16, 1.3);
+          [y, z].forEach((k, i) => CH[k][1].forEach(f => piano(c, out, f, t + (m + 1 + i) * b, .045, .7)));
+        });
+        return 27 * b;
       }
     },
-    stopMusic() {
-      this.music.forEach(o => { try { o.stop(); } catch (e) { /* already stopped */ } });
-      this.music = [];
+    // A slow, Canon-like romantic piece: piano arpeggios, a whole-note melody and a warm pad
+    romantic: {
+      gain: 1.5,
+      fadeIn: 3,
+      beat: 60 / 66,
+      bars: [
+        [130.81, [261.63, 329.63, 392], 659.25], [123.47, [293.66, 392, 493.88], 587.33],
+        [110, [261.63, 329.63, 440], 523.25], [98, [246.94, 329.63, 392], 493.88],
+        [87.31, [261.63, 349.23, 440], 440], [82.41, [261.63, 329.63, 392], 392],
+        [73.42, [293.66, 349.23, 440], 440], [98, [293.66, 392, 493.88], 493.88]
+      ],
+      step(c, out, t, i) {
+        const b = this.beat, [bass, [x, y, z], top] = this.bars[i % this.bars.length];
+        piano(c, out, bass, t, .14, 3.4);
+        piano(c, out, bass * 2, t, .05, 3);
+        [bass * 2, x, y, z, x * 2, z, y, x].forEach((f, k) => piano(c, out, f, t + k * b / 2, k ? .055 : .04, 2.2));
+        piano(c, out, top, t, .085, 3.4);
+        piano(c, out, top * 2, t + b * 2, .03, 2);
+        pad(c, out, [x, y, z], t, b * 4, .018);
+        return b * 4;
+      }
     }
   };
 
-  const HAPPY_BIRTHDAY = [
-    [784, .75], [784, .25], [880, 1], [784, 1], [1046.5, 1], [988, 2],
-    [784, .75], [784, .25], [880, 1], [784, 1], [1175, 1], [1046.5, 2],
-    [784, .75], [784, .25], [1568, 1], [1318.5, 1], [1046.5, 1], [988, 1], [880, 2],
-    [1397, .75], [1397, .25], [1318.5, 1], [1046.5, 1], [1175, 1], [1046.5, 2.5]
-  ];
+  const Music = {
+    bus: null, cur: null,
+    ensure() {
+      if (!Sound.init()) return false;
+      if (this.bus) return true;
+      const c = Sound.ctx;
+      this.bus = c.createGain();
+      const dry = c.createGain(), wet = c.createGain(), rev = c.createConvolver();
+      dry.gain.value = .85; wet.gain.value = .32;
+      // synthetic hall: decaying stereo noise
+      const len = Math.round(c.sampleRate * 2.6), ir = c.createBuffer(2, len, c.sampleRate);
+      for (let ch = 0; ch < 2; ch++) {
+        const d = ir.getChannelData(ch);
+        for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.4);
+      }
+      rev.buffer = ir;
+      this.bus.connect(dry); dry.connect(Sound.master);
+      this.bus.connect(rev); rev.connect(wet); wet.connect(Sound.master);
+      return true;
+    },
+    play(song) {
+      this.stop(.4);
+      if (!this.ensure()) return;
+      const c = Sound.ctx, out = c.createGain();
+      out.gain.setValueAtTime(.0001, c.currentTime);
+      out.gain.exponentialRampToValueAtTime(song.gain || 1, c.currentTime + (song.fadeIn || 1));
+      out.connect(this.bus);
+      const st = { song, out, next: c.currentTime + .15, i: 0 };
+      const tick = () => {
+        if (st.next < c.currentTime - .2) st.next = c.currentTime + .05; // tab was asleep
+        while (st.next < c.currentTime + 1) st.next += song.step(c, out, st.next, st.i++);
+      };
+      tick();
+      st.timer = setInterval(tick, 200);
+      this.cur = st;
+    },
+    stop(fade = .8) {
+      const st = this.cur;
+      if (!st) return;
+      this.cur = null;
+      clearInterval(st.timer);
+      const now = Sound.ctx.currentTime;
+      st.out.gain.cancelScheduledValues(now);
+      st.out.gain.setValueAtTime(Math.max(st.out.gain.value, .0001), now);
+      st.out.gain.exponentialRampToValueAtTime(.0001, now + fade);
+      setTimeout(() => { try { st.out.disconnect(); } catch (e) { /* ignore */ } }, fade * 1000 + 4000);
+    }
+  };
 
   /* ==========================================================
      Canvas sprites & shapes
@@ -493,7 +604,7 @@
     const old = $('.scene.active', stage) || $('.scene:not(.leaving)', stage);
     if (current) current.cleanup();
     token++;
-    Sound.stopMusic();
+    Sound.stopMusic(1.5);
     state.current = i; save();
 
     document.body.dataset.scene = String(i + 1);
@@ -610,7 +721,7 @@
         ctx.onLeave(() => document.documentElement.style.setProperty('--dim', '0'));
         setLit(1);
         revealIn(ctx, $$('.rv', inner), 320);
-        ctx.wait(1500).then(() => Sound.melody(HAPPY_BIRTHDAY));
+        ctx.wait(1200).then(() => Music.play(SONGS.birthday)); // loops until the candles are out
 
         let lit = n;
         const candles = $$('.candle', inner);
@@ -680,7 +791,7 @@
         });
 
         async function finish() {
-          Sound.stopMusic();
+          Sound.stopMusic(3);
           stopMic();
           hint.classList.add('gone');
           micBtn.classList.add('gone');
@@ -1245,6 +1356,7 @@
           hint.hidden = true;
           letter.hidden = false;
           letter.classList.add('unfold');
+          Music.play(SONGS.romantic);
           Sound.whoosh();
           ctx.el.scrollTo({ top: 0, behavior: 'auto' });
           await ctx.wait(1100);
@@ -1690,7 +1802,6 @@
   muteBtn.addEventListener('click', () => {
     Sound.init();
     Sound.setMuted(!Sound.muted);
-    if (Sound.muted) Sound.stopMusic();
     syncMute();
   });
   syncMute();
