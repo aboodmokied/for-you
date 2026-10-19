@@ -1037,7 +1037,7 @@
             ${mem.map((m, k) => `
               <figure class="polaroid" data-k="${k}" style="--r:${rots[k % rots.length]}deg; --h:${hues[k % hues.length]}">
                 <div class="photo${m.photo ? '' : ' noimg'}">
-                  ${m.photo ? `<img src="${esc(m.photo)}" alt="${esc(m.caption || '')}" draggable="false" decoding="async">` : ''}
+                  ${m.photo ? `<img src="${esc(m.photo)}" alt="${esc(m.caption || '')}" draggable="false" decoding="async"${m.focus ? ` style="object-position:${esc(m.focus)}"` : ''}>` : ''}
                   <span class="ph-fallback">${heartSVG()}</span>
                   <span class="develop"></span>
                 </div>
